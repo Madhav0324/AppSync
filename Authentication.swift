@@ -11,6 +11,7 @@ class AuthManager {
     private let tokenKey = "authToken"
     private let accessTokenKey = "accessToken"
     private let refreshTokenKey = "refreshToken"
+    private let usernameKey = "username"
 
     // MARK: - Cognito Configuration
 
@@ -28,13 +29,9 @@ class AuthManager {
     ) async -> Bool {
 
         let requestBody: [String: Any] = [
-
             "AuthFlow": "USER_PASSWORD_AUTH",
-
             "ClientId": clientId,
-
             "AuthParameters": [
-
                 "USERNAME": username,
                 "PASSWORD": password
             ]
@@ -70,13 +67,15 @@ class AuthManager {
 
             // MARK: - Send Request
 
-            let (data, response) = try await URLSession.shared.data(
-                for: request
-            )
+            let (data, response) =
+                try await URLSession.shared.data(
+                    for: request
+                )
 
             // MARK: - HTTP Response
 
-            guard let httpResponse = response as? HTTPURLResponse else {
+            guard let httpResponse =
+                    response as? HTTPURLResponse else {
 
                 print("Invalid response from Cognito")
                 return false
@@ -91,7 +90,6 @@ class AuthManager {
                     httpResponse.statusCode
                 )
 
-                // Print Cognito error for debugging
                 if let errorResponse = String(
                     data: data,
                     encoding: .utf8
@@ -106,9 +104,10 @@ class AuthManager {
 
             // MARK: - Convert Response To Dictionary
 
-            guard let json = try JSONSerialization.jsonObject(
-                with: data
-            ) as? [String: Any] else {
+            guard let json =
+                    try JSONSerialization.jsonObject(
+                        with: data
+                    ) as? [String: Any] else {
 
                 print("Could not decode Cognito response")
                 return false
@@ -116,41 +115,39 @@ class AuthManager {
 
             // MARK: - Authentication Result
 
-            guard let authResult = json["AuthenticationResult"]
+            guard let authResult =
+                    json["AuthenticationResult"]
                     as? [String: Any] else {
 
                 print("AuthenticationResult not found")
                 print(json)
-
                 return false
             }
 
             // MARK: - Get ID Token
 
-            guard let idToken = authResult["IdToken"]
-                    as? String else {
+            guard let idToken =
+                    authResult["IdToken"] as? String else {
 
                 print("ID token not found")
                 print(authResult)
-
                 return false
             }
 
             // MARK: - Get Access Token
 
-            guard let accessToken = authResult["AccessToken"]
-                    as? String else {
+            guard let accessToken =
+                    authResult["AccessToken"] as? String else {
 
                 print("Access token not found")
                 print(authResult)
-
                 return false
             }
 
             // MARK: - Get Refresh Token
 
-            if let refreshToken = authResult["RefreshToken"]
-                    as? String {
+            if let refreshToken =
+                authResult["RefreshToken"] as? String {
 
                 UserDefaults.standard.set(
                     refreshToken,
@@ -160,18 +157,21 @@ class AuthManager {
 
             // MARK: - Save Tokens
 
-            // ID token is used as the main authentication token
-            // for your API Gateway identity-based authorization.
-
             UserDefaults.standard.set(
                 idToken,
                 forKey: tokenKey
             )
 
-            // Save access token separately
             UserDefaults.standard.set(
                 accessToken,
                 forKey: accessTokenKey
+            )
+
+            // MARK: - Save Username
+
+            UserDefaults.standard.set(
+                username,
+                forKey: usernameKey
             )
 
             // MARK: - Confirm Login
@@ -179,6 +179,7 @@ class AuthManager {
             print("Sign in successful")
             print("ID token saved")
             print("Access token saved")
+            print("Username saved:", username)
 
             return true
 
@@ -211,6 +212,15 @@ class AuthManager {
         )
     }
 
+    // MARK: - Get Username
+
+    func getUsername() -> String? {
+
+        return UserDefaults.standard.string(
+            forKey: usernameKey
+        )
+    }
+
     // MARK: - Sign Out
 
     func signOut() {
@@ -227,6 +237,10 @@ class AuthManager {
             forKey: refreshTokenKey
         )
 
+        UserDefaults.standard.removeObject(
+            forKey: usernameKey
+        )
+
         print("Signed out")
     }
 
@@ -234,9 +248,10 @@ class AuthManager {
 
     func isSignedIn() -> Bool {
 
-        let token = UserDefaults.standard.string(
-            forKey: tokenKey
-        )
+        let token =
+            UserDefaults.standard.string(
+                forKey: tokenKey
+            )
 
         return token != nil
     }
