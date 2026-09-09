@@ -1,10 +1,6 @@
 import SwiftUI
-import Combine
 
 struct HomeView: View {
-
-    @State private var downloadedPackageIds: Set<String> = []
-    let refreshTimer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
 
     // MARK: - Package Data
 
@@ -18,17 +14,13 @@ struct HomeView: View {
     // MARK: - Selected Package
 
     @State private var selectedPackageId = ""
+    @State private var selectedPackagePath = ""
     @State private var selectedPackageName = ""
     @State private var selectedFiles: [PackageFile] = []
-
-    // MARK: - Downloading Packages
-
-    @State private var downloadingPackageIds: Set<String> = []
 
     // MARK: - Navigation
 
     @State private var showHomeView2 = false
-    @State private var isLoadingManifest = false
 
     // MARK: - Username
 
@@ -66,7 +58,7 @@ struct HomeView: View {
                         spacing: 24
                     ) {
 
-                        // MARK: - Top Navigation Bar
+                        // MARK: - Welcome
 
                         HStack {
 
@@ -95,7 +87,7 @@ struct HomeView: View {
 
                             Spacer()
 
-                            // MARK: - Sign Out Button
+                            // MARK: - Sign Out
 
                             Button {
 
@@ -136,39 +128,7 @@ struct HomeView: View {
 
                             } else {
 
-                                isLoading = true
-
-                                Task {
-
-                                    let receivedPackages =
-                                        await ApiCallClass
-                                            .apicallobject
-                                            .getAllPackageMetadata()
-
-                                    await MainActor.run {
-
-                                        if let receivedPackages {
-
-                                            packages = receivedPackages
-                                            showPackages = true
-                                            
-                                            // CHECK FOR TICK MARKS IMMEDIATELY AFTER LOADING
-                                            checkDownloadedPackages()
-
-                                            print(
-                                                "✅ Received \(receivedPackages.count) packages"
-                                            )
-
-                                        } else {
-
-                                            print(
-                                                "❌ Failed to receive packages"
-                                            )
-                                        }
-
-                                        isLoading = false
-                                    }
-                                }
+                                loadPackages()
                             }
 
                         } label: {
@@ -261,9 +221,7 @@ struct HomeView: View {
                                                         "book.closed.fill"
                                                 )
                                                 .font(
-                                                    .system(
-                                                        size: 20
-                                                    )
+                                                    .system(size: 20)
                                                 )
                                                 .foregroundStyle(.white)
 
@@ -308,9 +266,7 @@ struct HomeView: View {
 
                                                 Text(package.id)
                                                     .font(
-                                                        .system(
-                                                            size: 13
-                                                        )
+                                                        .system(size: 13)
                                                     )
                                                     .foregroundStyle(
                                                         .white.opacity(0.7)
@@ -333,9 +289,7 @@ struct HomeView: View {
                                                     ?? "Unknown"
                                                 )
                                                 .font(
-                                                    .system(
-                                                        size: 13
-                                                    )
+                                                    .system(size: 13)
                                                 )
                                                 .foregroundStyle(
                                                     .white.opacity(0.7)
@@ -359,9 +313,7 @@ struct HomeView: View {
                                                     )
                                                 )
                                                 .font(
-                                                    .system(
-                                                        size: 13
-                                                    )
+                                                    .system(size: 13)
                                                 )
                                                 .foregroundStyle(
                                                     .white.opacity(0.7)
@@ -373,13 +325,10 @@ struct HomeView: View {
                                             maxWidth: .infinity,
                                             alignment: .leading
                                         )
-
-                                        // Navigate to HomeView2
                                         .contentShape(Rectangle())
                                         .onTapGesture {
-                                            openPackage(
-                                                package
-                                            )
+
+                                            openPackage(package)
                                         }
 
                                         // MARK: - Download Button
@@ -387,60 +336,27 @@ struct HomeView: View {
                                         Button {
 
                                             downloadPackage(
-                                                packageId: package.id
+                                                package: package
                                             )
 
                                         } label: {
 
-                                            if downloadingPackageIds
-                                                .contains(package.id) {
-
-                                                ProgressView()
-                                                    .tint(.white)
-
-                                            } else if downloadedPackageIds
-                                                .contains(package.id) {
-
-                                                Image(
-                                                    systemName:
-                                                        "checkmark.circle.fill"
-                                                )
-                                                .font(
-                                                    .system(
-                                                        size: 22
-                                                    )
-                                                )
-                                                .foregroundStyle(.green)
-
-                                            } else {
-
-                                                Image(
-                                                    systemName:
-                                                        "arrow.down.circle"
-                                                )
-                                                .font(
-                                                    .system(
-                                                        size: 22
-                                                    )
-                                                )
-                                                .foregroundStyle(
-                                                    .white.opacity(0.8)
-                                                )
-                                            }
+                                            Image(
+                                                systemName:
+                                                    "arrow.down.circle"
+                                            )
+                                            .font(
+                                                .system(size: 22)
+                                            )
+                                            .foregroundStyle(
+                                                .white.opacity(0.8)
+                                            )
                                         }
                                         .frame(
                                             width: 55,
                                             height: 55
                                         )
                                         .buttonStyle(.plain)
-
-                                        .disabled(
-                                            downloadingPackageIds
-                                                .contains(package.id)
-                                            ||
-                                            downloadedPackageIds
-                                                .contains(package.id)
-                                        )
                                     }
                                     .background(
                                         .white.opacity(0.07)
@@ -468,7 +384,32 @@ struct HomeView: View {
                 }
             }
 
-            // MARK: - Navigation to HomeView2
+            // MARK: - Refresh Token Button
+
+            .toolbar {
+
+                ToolbarItem(
+                    placement: .topBarTrailing
+                ) {
+
+                    Button {
+
+                        Task {
+                            await refreshTokens()
+                        }
+
+                    } label: {
+
+                        Image(
+                            systemName:
+                                "arrow.clockwise"
+                        )
+                        .foregroundStyle(.white)
+                    }
+                }
+            }
+
+            // MARK: - Navigate to HomeView2
 
             .navigationDestination(
                 isPresented: $showHomeView2
@@ -476,20 +417,80 @@ struct HomeView: View {
 
                 HomeView2(
                     packageId: selectedPackageId,
+                    packagePath: selectedPackagePath,
                     packageName: selectedPackageName,
                     files: selectedFiles
                 )
             }
         }
 
-        // MARK: - Lifecycle Hooks
+        // MARK: - Lifecycle
 
         .onAppear {
-            username = AuthManager.shared.getUsername() ?? "Unknown User"
-            checkDownloadedPackages()
+
+            username =
+                AuthManager.shared.getUsername()
+                ?? "Unknown User"
         }
-        .onReceive(refreshTimer) { _ in
-            checkDownloadedPackages()
+    }
+
+    // MARK: - Load Packages
+
+    private func loadPackages() {
+
+        isLoading = true
+
+        Task {
+
+            let receivedPackages =
+                await ApiCallClass
+                    .apicallobject
+                    .getAllPackageMetadata()
+
+            await MainActor.run {
+
+                if let receivedPackages {
+
+                    packages = receivedPackages
+                    showPackages = true
+
+                    print(
+                        "✅ Received \(receivedPackages.count) packages"
+                    )
+
+                } else {
+
+                    print(
+                        "❌ Failed to receive packages"
+                    )
+                }
+
+                isLoading = false
+            }
+        }
+    }
+
+    // MARK: - Refresh Cognito Token
+
+    private func refreshTokens() async {
+
+        let success =
+            await AuthManager.shared.refreshToken()
+
+        await MainActor.run {
+
+            if success {
+
+                print(
+                    "🔄 Token refreshed successfully"
+                )
+
+            } else {
+
+                print(
+                    "❌ Could not refresh token"
+                )
+            }
         }
     }
 
@@ -499,8 +500,11 @@ struct HomeView: View {
         _ package: Package
     ) {
 
-        selectedPackageId = package.id
-        isLoadingManifest = true
+        selectedPackageId =
+            package.id
+
+        selectedPackagePath =
+            package.path ?? ""
 
         Task {
 
@@ -516,13 +520,22 @@ struct HomeView: View {
                 if let files {
 
                     selectedPackageName =
-                        package.path
-                        ?? "Unknown Package"
+                        URL(
+                            fileURLWithPath:
+                                package.path
+                                ?? "Unknown Package"
+                        )
+                        .lastPathComponent
 
                     selectedFiles = files
 
                     print(
-                        "✅ Received \(files.count) files"
+                        "📦 Package path:",
+                        package.path ?? "nil"
+                    )
+
+                    print(
+                        "📄 Received \(files.count) files"
                     )
 
                     showHomeView2 = true
@@ -533,35 +546,25 @@ struct HomeView: View {
                         "❌ Failed to get package manifest"
                     )
                 }
-
-                isLoadingManifest = false
             }
         }
     }
 
-    // MARK: - Download Complete Package
+    // MARK: - Download Package
 
     private func downloadPackage(
-        packageId: String
+        package: Package
     ) {
 
-        guard !downloadingPackageIds.contains(
-            packageId
-        ) else {
-            return
-        }
-
-        downloadingPackageIds.insert(
-            packageId
-        )
-
         Task {
+
+            // Get the files inside the package.
 
             let files =
                 await PackageManifestApiClass
                     .packageManifestObject
                     .getPackageManifest(
-                        packageId: packageId
+                        packageId: package.id
                     )
 
             guard let files else {
@@ -570,13 +573,6 @@ struct HomeView: View {
                     "❌ Failed to get package manifest for download"
                 )
 
-                await MainActor.run {
-
-                    downloadingPackageIds.remove(
-                        packageId
-                    )
-                }
-
                 return
             }
 
@@ -584,37 +580,67 @@ struct HomeView: View {
                 "📦 Package contains \(files.count) files"
             )
 
-            let success =
-                await DownloadApiClass
-                    .downloadApiObject
-                    .downloadPackage(
-                        packageId: packageId,
-                        files: files
+            // Download each file.
+
+            for file in files {
+
+                // Step 1:
+                // Ask backend for the secure download URL.
+
+                guard let downloadURL =
+                        await DownloadApiClass
+                            .shared
+                            .getDownloadURL(
+                                packageId: package.id,
+                                fileId: file.id
+                            )
+                else {
+
+                    print(
+                        "❌ Could not get download URL for \(file.id)"
                     )
 
-            await MainActor.run {
+                    continue
+                }
 
-                downloadingPackageIds.remove(
-                    packageId
+                print(
+                    "🔗 Got download URL for \(file.id)"
                 )
 
-                if success {
+                // Step 2:
+                // Download the file and save it locally.
 
-                    downloadedPackageIds.insert(
-                        packageId
-                    )
+                guard let fileURL =
+                        await DownloadApiClass
+                            .shared
+                            .downloadFile(
+                                from: downloadURL,
+                                fileName: file.path ?? file.id
+                            )
+                else {
 
                     print(
-                        "✅ COMPLETE PACKAGE DOWNLOADED: \(packageId)"
+                        "❌ Failed to download \(file.id)"
                     )
 
-                } else {
-
-                    print(
-                        "❌ PACKAGE DOWNLOAD FAILED: \(packageId)"
-                    )
+                    continue
                 }
+
+                // Step 3:
+                // fileURL tells us where the file was saved.
+
+                print(
+                    "✅ Downloaded \(file.id)"
+                )
+
+                print(
+                    "📍 Saved at: \(fileURL.path)"
+                )
             }
+
+            print(
+                "✅ Package download process completed"
+            )
         }
     }
 
@@ -640,41 +666,16 @@ struct HomeView: View {
             from: date
         )
     }
-    
-    // MARK: - Check Local Storage
-    
-    private func checkDownloadedPackages() {
-        var newlyFound: Set<String> = []
-        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        
-        for package in packages {
-            // Check if downloaded via DownloadApiClass
-            let isFolderDownloaded = DownloadApiClass.downloadApiObject.isPackageDownloaded(packageId: package.id)
-            
-            // Check if downloaded as zip
-            let rawPath = package.path ?? "notebook_v1"
-            let safeZipName = rawPath.replacingOccurrences(of: "/", with: "-") + ".zip"
-            let isZipDownloaded = FileManager.default.fileExists(atPath: documentsDirectory.appendingPathComponent(safeZipName).path)
-            
-            if isFolderDownloaded || isZipDownloaded {
-                newlyFound.insert(package.id)
-            }
-        }
-        
-        if downloadedPackageIds != newlyFound {
-            downloadedPackageIds = newlyFound
-        }
-    }
 }
-
 
 // MARK: - Preview
 
 #Preview {
 
-    HomeView(
-        onSignOut: {
-            print("User signed out")
-        }
-    )
+    HomeView {
+
+        print(
+            "User signed out"
+        )
+    }
 }

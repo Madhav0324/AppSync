@@ -1,11 +1,9 @@
+
 import Foundation
 
-// MARK: - Download Request Models
+// MARK: - Request Models
 
 struct DownloadRequest: Codable {
-
-    // MARK: - CHANGED
-    // The API expects an array called "packages".
 
     let packages: [DownloadPackage]
 }
@@ -16,7 +14,7 @@ struct DownloadPackage: Codable {
     let files: [String]
 }
 
-// MARK: - Download Response Models
+// MARK: - Response Models
 
 struct DownloadResponse: Codable {
 
@@ -35,49 +33,33 @@ struct DownloadedFile: Codable {
     let path: String?
     let downloadUrl: String
     let size: Int
-
-    enum CodingKeys: String, CodingKey {
-
-        case id
-        case path
-        case downloadUrl
-        case size
-    }
 }
 
-// MARK: - Download API Class
+// MARK: - Download API
 
 class DownloadApiClass {
 
-    static let downloadApiObject = DownloadApiClass()
+    static let shared = DownloadApiClass()
 
     private init() {}
-
-    // MARK: - API URL
 
     private let downloadURL = URL(
         string: "https://j21sih3zdd.execute-api.eu-north-1.amazonaws.com/download"
     )!
-
-    // MARK: - Get ID Token
-
-    private func getToken() -> String? {
-
-        return AuthManager.shared.getToken()
-    }
 
     // MARK: - Get Download URL
 
     func getDownloadURL(
         packageId: String,
         fileId: String
-    ) async -> DownloadedFile? {
+    ) async -> String? {
 
-        // Get JWT token
+        // Get authentication token
 
-        guard let token = getToken() else {
+        guard let token = AuthManager.shared.getToken() else {
 
             print("❌ ID token not found")
+
             return nil
         }
 
@@ -94,19 +76,15 @@ class DownloadApiClass {
 
         do {
 
-            // Convert request body to JSON
+            // Convert Swift object → JSON
 
             let jsonData =
-                try JSONEncoder().encode(
-                    requestBody
-                )
+                try JSONEncoder().encode(requestBody)
 
             // Create HTTP request
 
             var request =
-                URLRequest(
-                    url: downloadURL
-                )
+                URLRequest(url: downloadURL)
 
             request.httpMethod = "POST"
 
@@ -122,11 +100,7 @@ class DownloadApiClass {
 
             request.httpBody = jsonData
 
-            print("📤 Requesting download URL")
-            print("Package:", packageId)
-            print("File:", fileId)
-
-            // Send request
+            // Send request to backend
 
             let (data, response) =
                 try await URLSession.shared.data(
@@ -138,34 +112,22 @@ class DownloadApiClass {
             guard let httpResponse =
                     response as? HTTPURLResponse else {
 
-                print(
-                    "❌ Invalid Download API response"
-                )
+                print("❌ Invalid API response")
 
                 return nil
             }
-
-            // Check status code
 
             guard httpResponse.statusCode == 200 else {
 
                 print(
-                    "❌ Download API failed:",
+                    "❌ API request failed with status:",
                     httpResponse.statusCode
                 )
-
-                if let error = String(
-                    data: data,
-                    encoding: .utf8
-                ) {
-
-                    print(error)
-                }
 
                 return nil
             }
 
-            // Decode response
+            // Convert JSON → Swift object
 
             let downloadResponse =
                 try JSONDecoder().decode(
@@ -173,32 +135,44 @@ class DownloadApiClass {
                     from: data
                 )
 
-            // Get returned file
+            // Get the first package
 
-            guard let downloadedFile =
-                    downloadResponse
-                        .packages
-                        .first?
-                        .files
-                        .first else {
+            guard let downloadedPackage =
+                    downloadResponse.packages.first else {
 
-                print(
-                    "❌ No download file returned"
-                )
+                print("❌ No package returned")
 
                 return nil
             }
 
+            // Get the first file
+
+            guard let downloadedFile =
+                    downloadedPackage.files.first else {
+
+                print("❌ No file returned")
+
+                return nil
+            }
+
+            // Print the URL so we can verify it
+
             print(
-                "✅ Download URL received"
+                "🔗 Download URL returned by backend:"
             )
 
-            return downloadedFile
+            print(
+                downloadedFile.downloadUrl
+            )
+
+            // Return the secure download URL
+
+            return downloadedFile.downloadUrl
 
         } catch {
 
             print(
-                "❌ Download API error:",
+                "❌ API error:",
                 error.localizedDescription
             )
 
@@ -206,20 +180,38 @@ class DownloadApiClass {
         }
     }
 
-    // MARK: - Download One File
+    // MARK: - Download File
 
     func downloadFile(
         from downloadUrl: String,
         fileName: String
     ) async -> URL? {
 
-        // Convert the presigned URL into a URL.
+        // Convert String → URL
 
-        guard let url =
-                URL(string: downloadUrl) else {
+        guard let url = URL(
+            string: downloadUrl
+        ) else {
+
+            print("❌ Invalid download URL:")
+            print(downloadUrl)
+
+            return nil
+        }
+
+        // Make sure this is a web URL
+
+        guard let scheme = url.scheme,
+              scheme == "https" || scheme == "http" else {
 
             print(
-                "❌ Invalid download URL"
+                "❌ Download URL is not an HTTP/HTTPS URL:"
+            )
+
+            print(downloadUrl)
+
+            print(
+                "⚠️ The backend must return a presigned HTTPS URL."
             )
 
             return nil
@@ -227,25 +219,20 @@ class DownloadApiClass {
 
         do {
 
-            print(
-                "⬇️ Downloading file:",
-                fileName
-            )
-
-            // Download actual file from S3.
+            // MARK: - Download File
 
             let (data, response) =
                 try await URLSession.shared.data(
                     from: url
                 )
 
-            // Check HTTP response.
+            // Check HTTP response
 
             guard let httpResponse =
                     response as? HTTPURLResponse else {
 
                 print(
-                    "❌ Invalid S3 response"
+                    "❌ Invalid file download response"
                 )
 
                 return nil
@@ -254,14 +241,27 @@ class DownloadApiClass {
             guard httpResponse.statusCode == 200 else {
 
                 print(
-                    "❌ S3 download failed:",
+                    "❌ File download failed."
+                )
+
+                print(
+                    "HTTP Status:",
                     httpResponse.statusCode
                 )
 
                 return nil
             }
 
-            // Get Documents directory.
+            print(
+                "✅ File received from server"
+            )
+
+            print(
+                "📦 Downloaded bytes:",
+                data.count
+            )
+
+            // MARK: - Documents Directory
 
             let documentsDirectory =
                 FileManager.default.urls(
@@ -269,23 +269,40 @@ class DownloadApiClass {
                     in: .userDomainMask
                 )[0]
 
-            // Make sure only the filename is used.
+            // MARK: - Downloads Directory
 
-            let safeFileName =
-                URL(
-                    fileURLWithPath: fileName
+            let downloadsDirectory =
+                documentsDirectory.appendingPathComponent(
+                    "Downloads",
+                    isDirectory: true
                 )
-                .lastPathComponent
 
-            // Create destination URL.
+            // Create Downloads folder
+
+            try FileManager.default.createDirectory(
+                at: downloadsDirectory,
+                withIntermediateDirectories: true
+            )
+
+            // MARK: - File Location
 
             let fileURL =
-                documentsDirectory
-                    .appendingPathComponent(
-                        safeFileName
-                    )
+                downloadsDirectory.appendingPathComponent(
+                    fileName
+                )
 
-            // Remove old file if it exists.
+            // Create parent directory if fileName
+            // contains folders.
+
+            let parentDirectory =
+                fileURL.deletingLastPathComponent()
+
+            try FileManager.default.createDirectory(
+                at: parentDirectory,
+                withIntermediateDirectories: true
+            )
+
+            // Remove existing file
 
             if FileManager.default.fileExists(
                 atPath: fileURL.path
@@ -296,18 +313,23 @@ class DownloadApiClass {
                 )
             }
 
-            // Save file.
+            // Save downloaded data
 
             try data.write(
                 to: fileURL
             )
 
+            // MARK: - Success
+
             print(
-                "✅ File successfully saved"
+                "✅ File downloaded successfully"
             )
 
             print(
-                "📁 Location:",
+                "📍 File stored at:"
+            )
+
+            print(
                 fileURL.path
             )
 
@@ -316,390 +338,10 @@ class DownloadApiClass {
         } catch {
 
             print(
-                "❌ Failed to download file:",
-                error.localizedDescription
-            )
-
-            return nil
-        }
-    }
-
-    // MARK: - CHANGED:
-    // Check If Package Is Downloaded
-
-    func isPackageDownloaded(
-        packageId: String
-    ) -> Bool {
-
-        // Get Documents directory.
-
-        let documentsDirectory =
-            FileManager.default.urls(
-                for: .documentDirectory,
-                in: .userDomainMask
-            )[0]
-
-        // Build:
-        //
-        // Documents/Packages/<packageId>
-
-        let packageDirectory =
-            documentsDirectory
-                .appendingPathComponent(
-                    "Packages",
-                    isDirectory: true
-                )
-                .appendingPathComponent(
-                    packageId,
-                    isDirectory: true
-                )
-
-        // Check whether the package directory exists.
-
-        let exists =
-            FileManager.default.fileExists(
-                atPath: packageDirectory.path
-            )
-
-        print(
-            "📦 Package \(packageId) downloaded:",
-            exists
-        )
-
-        return exists
-    }
-
-    // MARK: - ADDED: Check If File Is Downloaded
-    func isFileDownloaded(packageId: String, fileName: String) -> Bool {
-        let documentsDirectory = FileManager.default.urls(
-            for: .documentDirectory,
-            in: .userDomainMask
-        )[0]
-        
-        let safeFileName = URL(fileURLWithPath: fileName).lastPathComponent
-        
-        let fileURL = documentsDirectory
-            .appendingPathComponent("Packages", isDirectory: true)
-            .appendingPathComponent(packageId, isDirectory: true)
-            .appendingPathComponent(safeFileName)
-            
-        return FileManager.default.fileExists(atPath: fileURL.path)
-    }
-
-    // MARK: - Download Entire Package
-
-    func downloadPackage(
-        packageId: String,
-        files: [PackageFile]
-    ) async -> Bool {
-
-        guard !files.isEmpty else {
-
-            print(
-                "❌ Package contains no files"
-            )
-
-            return false
-        }
-
-        print("")
-        print(
-            "📦 Starting package download"
-        )
-
-        print(
-            "Package ID:",
-            packageId
-        )
-
-        print(
-            "Files:",
-            files.count
-        )
-
-        // MARK: - Temporary Staging Storage
-
-        let cachesDirectory =
-            FileManager.default.urls(
-                for: .cachesDirectory,
-                in: .userDomainMask
-            )[0]
-
-        let stagingDirectory =
-            cachesDirectory
-                .appendingPathComponent(
-                    "Staging",
-                    isDirectory: true
-                )
-                .appendingPathComponent(
-                    packageId,
-                    isDirectory: true
-                )
-
-        do {
-
-            // Create staging directory.
-
-            try FileManager.default.createDirectory(
-                at: stagingDirectory,
-                withIntermediateDirectories: true
+                "❌ Download error:"
             )
 
             print(
-                "📂 Staging:",
-                stagingDirectory.path
-            )
-
-            // MARK: - Download Every File
-
-            for file in files {
-
-                print("")
-
-                print(
-                    "⬇️ Downloading file:",
-                    file.id
-                )
-
-                // Get presigned S3 URL.
-
-                guard let downloadedFile =
-                        await getDownloadURL(
-                            packageId: packageId,
-                            fileId: file.id
-                        ) else {
-
-                    print(
-                        "❌ Could not get download URL"
-                    )
-
-                    // Delete incomplete package.
-
-                    try? FileManager.default.removeItem(
-                        at: stagingDirectory
-                    )
-
-                    return false
-                }
-
-                // Get only the filename.
-
-                let fileName =
-                    URL(
-                        fileURLWithPath:
-                            downloadedFile.path
-                            ?? file.path
-                            ?? file.id
-                    )
-                    .lastPathComponent
-
-                // Download actual file into staging.
-
-                guard await downloadFileToStaging(
-                    from: downloadedFile.downloadUrl,
-                    fileName: fileName,
-                    stagingDirectory: stagingDirectory
-                ) != nil else {
-
-                    print(
-                        "❌ Failed to download:",
-                        fileName
-                    )
-
-                    // Delete incomplete package.
-
-                    try? FileManager.default.removeItem(
-                        at: stagingDirectory
-                    )
-
-                    return false
-                }
-
-                print(
-                    "✅ Staged:",
-                    fileName
-                )
-            }
-
-            // MARK: - Move Complete Package
-
-            print("")
-
-            print(
-                "✅ All files downloaded"
-            )
-
-            print(
-                "📦 Moving package to permanent storage"
-            )
-
-            // Get Documents directory.
-
-            let documentsDirectory =
-                FileManager.default.urls(
-                    for: .documentDirectory,
-                    in: .userDomainMask
-                )[0]
-
-            // Create Packages directory.
-
-            let packagesDirectory =
-                documentsDirectory
-                    .appendingPathComponent(
-                        "Packages",
-                        isDirectory: true
-                    )
-
-            try FileManager.default.createDirectory(
-                at: packagesDirectory,
-                withIntermediateDirectories: true
-            )
-
-            // Create final package directory.
-
-            let finalPackageDirectory =
-                packagesDirectory
-                    .appendingPathComponent(
-                        packageId,
-                        isDirectory: true
-                    )
-
-            // Remove old package if it exists.
-
-            if FileManager.default.fileExists(
-                atPath: finalPackageDirectory.path
-            ) {
-
-                try FileManager.default.removeItem(
-                    at: finalPackageDirectory
-                )
-            }
-
-            // Move complete package from staging
-            // into permanent storage.
-
-            try FileManager.default.moveItem(
-                at: stagingDirectory,
-                to: finalPackageDirectory
-            )
-
-            print(
-                "🎉 Package download complete"
-            )
-
-            print(
-                "📁 Saved at:",
-                finalPackageDirectory.path
-            )
-
-            // ADDED: Simple broadcast notification using a raw String
-            NotificationCenter.default.post(
-                name: Notification.Name("PackageDownloadedNotification"),
-                object: nil,
-                userInfo: ["packageId": packageId]
-            )
-
-            return true
-
-        } catch {
-
-            print(
-                "❌ Package download failed:",
-                error.localizedDescription
-            )
-
-            // Clean up staging.
-
-            try? FileManager.default.removeItem(
-                at: stagingDirectory
-            )
-
-            return false
-        }
-    }
-
-    // MARK: - Download One File Into Staging
-
-    private func downloadFileToStaging(
-        from downloadUrl: String,
-        fileName: String,
-        stagingDirectory: URL
-    ) async -> URL? {
-
-        guard let url =
-                URL(string: downloadUrl) else {
-
-            print(
-                "❌ Invalid download URL"
-            )
-
-            return nil
-        }
-
-        do {
-
-            print(
-                "⬇️ Downloading:",
-                fileName
-            )
-
-            // Download file from S3.
-
-            let (data, response) =
-                try await URLSession.shared.data(
-                    from: url
-                )
-
-            // Check response.
-
-            guard let httpResponse =
-                    response as? HTTPURLResponse else {
-
-                print(
-                    "❌ Invalid S3 response"
-                )
-
-                return nil
-            }
-
-            guard httpResponse.statusCode == 200 else {
-
-                print(
-                    "❌ S3 download failed:",
-                    httpResponse.statusCode
-                )
-
-                return nil
-            }
-
-            // Make sure only filename is used.
-
-            let safeFileName =
-                URL(
-                    fileURLWithPath: fileName
-                )
-                .lastPathComponent
-
-            // Create staging file URL.
-
-            let fileURL =
-                stagingDirectory
-                    .appendingPathComponent(
-                        safeFileName
-                    )
-
-            // Save file into staging.
-
-            try data.write(
-                to: fileURL
-            )
-
-            return fileURL
-
-        } catch {
-
-            print(
-                "❌ Failed to save file:",
                 error.localizedDescription
             )
 
@@ -707,3 +349,4 @@ class DownloadApiClass {
         }
     }
 }
+
