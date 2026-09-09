@@ -1,90 +1,893 @@
-
 import Foundation
 
-// MARK: - Request Models
+// MARK: - Download Request Models
 
 struct DownloadRequest: Codable {
-
     let packages: [DownloadPackage]
 }
 
 struct DownloadPackage: Codable {
-
     let packageId: String
     let files: [String]
 }
 
-// MARK: - Response Models
+// MARK: - Download Response Models
 
 struct DownloadResponse: Codable {
-
     let packages: [DownloadedPackage]
 }
 
 struct DownloadedPackage: Codable {
-
     let packageId: String
     let files: [DownloadedFile]
 }
 
 struct DownloadedFile: Codable {
-
     let id: String
     let path: String?
     let downloadUrl: String
     let size: Int
 }
 
-// MARK: - Download API
+// MARK: - Download Manager
 
-class DownloadApiClass {
+final class DownloadApiClass {
 
     static let shared = DownloadApiClass()
 
     private init() {}
 
+    // MARK: - API Gateway URL
+
     private let downloadURL = URL(
         string: "https://j21sih3zdd.execute-api.eu-north-1.amazonaws.com/download"
     )!
 
-    // MARK: - Get Download URL
+    // MARK: - Local Storage
 
-    func getDownloadURL(
+    private var packagesDirectory: URL {
+
+        let documentsDirectory =
+            FileManager.default.urls(
+                for: .documentDirectory,
+                in: .userDomainMask
+            )[0]
+
+        return documentsDirectory.appendingPathComponent(
+            "Packages",
+            isDirectory: true
+        )
+    }
+
+    // MARK: - Temporary Staging
+
+    private var stagingDirectory: URL {
+
+        let documentsDirectory =
+            FileManager.default.urls(
+                for: .documentDirectory,
+                in: .userDomainMask
+            )[0]
+
+        return documentsDirectory.appendingPathComponent(
+            "DownloadStaging",
+            isDirectory: true
+        )
+    }
+
+    // MARK: - Download Package
+
+    func downloadPackage(
+        package: Package
+    ) async -> Bool {
+
+        print("")
+        print("📦 Starting package synchronization")
+        print("Package ID:", package.id)
+        print("Package path:", package.path ?? "nil")
+
+        // MARK: Step 1 - Validate package path
+
+        guard let packagePath = package.path else {
+
+            print("❌ Package does not have a path")
+
+            return false
+        }
+
+        // MARK: Step 2 - Find local package
+
+        let localPackageDirectory =
+            packagesDirectory.appendingPathComponent(
+                sanitizedRelativePath(packagePath),
+                isDirectory: true
+            )
+
+        print("")
+        print("📁 LOCAL PACKAGE DIRECTORY")
+        print(localPackageDirectory.path)
+        print("")
+
+        let packageExists =
+            packageDirectoryExists(
+                at: localPackageDirectory
+            )
+
+        print("Package exists:", packageExists)
+
+        // MARK: Step 3 - Get SyncTable record
+
+        let syncRecord =
+            SyncTable.shared.getRecord(
+                packageId: package.id
+            )
+
+        // MARK: Step 4 - Get server manifest
+
+        guard let files =
+                await PackageManifestApiClass
+                    .packageManifestObject
+                    .getPackageManifest(
+                        packageId: package.id
+                    )
+        else {
+
+            print("❌ Could not get package manifest")
+
+            return false
+        }
+
+        // MARK: Step 5 - First-time synchronization
+
+        guard packageExists,
+              let syncRecord = syncRecord
+        else {
+
+            print("🆕 Package has not been synchronized before")
+            print("⬇️ Downloading all files")
+
+            return await downloadFiles(
+                package: package,
+                packagePath: packagePath,
+                files: files,
+                packageExists: false,
+                localPackageDirectory: localPackageDirectory
+            )
+        }
+
+        // MARK: Step 6 - Get local modification time
+
+        guard let localLastMod =
+                getLocalPackageLastModified(
+                    at: localPackageDirectory
+                )
+        else {
+
+            print("⚠️ Could not determine local modification time")
+            print("⬇️ Downloading package")
+
+            return await downloadFiles(
+                package: package,
+                packagePath: packagePath,
+                files: files,
+                packageExists: true,
+                localPackageDirectory: localPackageDirectory
+            )
+        }
+
+        let syncLastMod = syncRecord.lastMod
+        let serverLastMod = package.lastMod
+
+        /*
+         Filesystem timestamps have lower precision than
+         the server timestamp.
+
+         Local timestamp -> seconds
+         SyncTable       -> exact milliseconds
+         Server          -> exact milliseconds
+
+         We use seconds when comparing local filesystem
+         with SyncTable.
+
+         SyncTable continues to store the exact
+         server millisecond timestamp.
+         */
+
+        let localSeconds = localLastMod / 1000
+        let syncSeconds = syncLastMod / 1000
+
+        print("")
+        print("========== SYNC COMPARISON ==========")
+        print("Package:", package.id)
+        print("Local lastMod:", localLastMod)
+        print("SyncTable lastMod:", syncLastMod)
+        print("Server lastMod:", serverLastMod)
+        print("-------------------------------------")
+        print("Local seconds:", localSeconds)
+        print("Sync seconds:", syncSeconds)
+        print("=====================================")
+        print("")
+
+        // MARK: CASE 1
+        //
+        // Local == SyncTable < Server
+        //
+        // Server changed.
+        // Local did not change.
+        //
+        // DOWNLOAD
+
+        if localSeconds == syncSeconds &&
+            syncLastMod < serverLastMod {
+
+            print("⬇️ CASE 1")
+            print("Local == SyncTable < Server")
+            print("Server has newer data")
+            print("⬇️ Download required")
+
+            return await downloadFiles(
+                package: package,
+                packagePath: packagePath,
+                files: files,
+                packageExists: true,
+                localPackageDirectory: localPackageDirectory
+            )
+        }
+
+        // MARK: CASE 2
+        //
+        // Local == SyncTable == Server
+        //
+        // Everything is synchronized.
+
+        if localSeconds == syncSeconds &&
+            syncLastMod == serverLastMod {
+
+            print("✅ CASE 2")
+            print("Local == SyncTable == Server")
+            print("No changes required")
+
+            return true
+        }
+
+        // MARK: CASE 3
+        //
+        // Local > SyncTable == Server
+        //
+        // Local changed.
+        // Server did not change.
+        //
+        // UPLOAD NEEDED
+
+        if localSeconds > syncSeconds &&
+            syncLastMod == serverLastMod {
+
+            print("⬆️ CASE 3")
+            print("Local > SyncTable == Server")
+            print("UPLOAD NEEDS TO BE DONE")
+            print("Package:", package.id)
+
+            return true
+        }
+
+        // MARK: CASE 4
+        //
+        // Local > SyncTable < Server
+        //
+        // Local changed.
+        // Server changed.
+        //
+        // CONFLICT
+
+        if localSeconds > syncSeconds &&
+            syncLastMod < serverLastMod {
+
+            print("⚠️ CASE 4")
+            print("Local > SyncTable < Server")
+            print("CONFLICT DETECTED")
+            print("Package:", package.id)
+
+            SyncTable.shared.updateConflict(
+                packageId: package.id,
+                conflict: true
+            )
+
+            return false
+        }
+
+        // MARK: CASE 5
+        //
+        // Local == SyncTable > Server
+        //
+        // Ignore.
+
+        if localSeconds == syncSeconds &&
+            syncLastMod > serverLastMod {
+
+            print("ℹ️ CASE 5")
+            print("Local == SyncTable > Server")
+            print("Ignoring this case")
+
+            return true
+        }
+
+        // MARK: Fallback
+
+        print("⚠️ Unhandled synchronization state")
+        print("Local:", localLastMod)
+        print("SyncTable:", syncLastMod)
+        print("Server:", serverLastMod)
+
+        return false
+    }
+
+    // MARK: - Download Files
+
+    private func downloadFiles(
+        package: Package,
+        packagePath: String,
+        files: [PackageFile],
+        packageExists: Bool,
+        localPackageDirectory: URL
+    ) async -> Bool {
+
+        let operationID =
+            UUID().uuidString
+
+        let operationStagingDirectory =
+            stagingDirectory.appendingPathComponent(
+                operationID,
+                isDirectory: true
+            )
+
+        let packageStagingDirectory =
+            operationStagingDirectory.appendingPathComponent(
+                sanitizedRelativePath(packagePath),
+                isDirectory: true
+            )
+
+        do {
+
+            // MARK: Step 1 - Create operation staging directory
+
+            try FileManager.default.createDirectory(
+                at: operationStagingDirectory,
+                withIntermediateDirectories: true
+            )
+
+            // MARK: Step 2 - Prepare package in staging
+
+            if packageExists {
+
+                print("")
+                print("📋 EXISTING PACKAGE")
+                print("Copying entire package into staging")
+                print("FROM:")
+                print(localPackageDirectory.path)
+                print("TO:")
+                print(packageStagingDirectory.path)
+                print("")
+
+                /*
+                 IMPORTANT:
+
+                 copyItem does NOT automatically create all
+                 intermediate destination directories.
+
+                 Therefore we create the parent directory of
+                 packageStagingDirectory first.
+                 */
+
+                let stagingPackageParent =
+                    packageStagingDirectory
+                        .deletingLastPathComponent()
+
+                try FileManager.default.createDirectory(
+                    at: stagingPackageParent,
+                    withIntermediateDirectories: true
+                )
+
+                // Verify source really exists as a directory.
+
+                guard packageDirectoryExists(
+                    at: localPackageDirectory
+                ) else {
+
+                    print("❌ Source package does not exist")
+                    print(localPackageDirectory.path)
+
+                    removeStagingDirectory(
+                        operationStagingDirectory
+                    )
+
+                    return false
+                }
+
+                // Copy COMPLETE package into staging.
+
+                try FileManager.default.copyItem(
+                    at: localPackageDirectory,
+                    to: packageStagingDirectory
+                )
+
+                print("✅ Existing package copied to staging")
+
+            } else {
+
+                print("")
+                print("🆕 NEW PACKAGE")
+                print("Creating empty package in staging")
+                print("")
+
+                try FileManager.default.createDirectory(
+                    at: packageStagingDirectory,
+                    withIntermediateDirectories: true
+                )
+
+                print("✅ Empty package created in staging")
+            }
+
+            // MARK: Step 3 - Download NEW / CHANGED files
+
+            print("")
+            print("🔎 Checking server files")
+            print("")
+
+            for file in files {
+
+                guard let filePath = file.path else {
+
+                    print("⚠️ File has no path")
+                    print("File:", file.id)
+
+                    continue
+                }
+
+                let safeFilePath =
+                    sanitizedRelativePath(filePath)
+
+                let stagedFileURL =
+                    packageStagingDirectory.appendingPathComponent(
+                        safeFilePath
+                    )
+
+                /*
+                 Existing package:
+
+                 The package was already copied into staging.
+
+                 Therefore:
+
+                 File exists in staging
+                       ↓
+                 Check whether server file is newer
+                       ↓
+                 YES → download replacement
+                 NO  → keep copied file
+
+                 New package:
+
+                 File does not exist
+                       ↓
+                 download it
+                 */
+
+                let fileExistsInStaging =
+                    FileManager.default.fileExists(
+                        atPath: stagedFileURL.path
+                    )
+
+                var fileNeedsDownload = !fileExistsInStaging
+
+                if fileExistsInStaging {
+
+                    if let localFileLastMod =
+                        getFileModificationTime(
+                            at: stagedFileURL
+                        ) {
+
+                        let localFileSeconds =
+                            localFileLastMod / 1000
+
+                        let serverFileSeconds =
+                            file.lastMod / 1000
+
+                        if localFileSeconds < serverFileSeconds {
+
+                            fileNeedsDownload = true
+
+                            print("🔄 File changed on server")
+                            print("File:", file.id)
+                            print("Local:", localFileLastMod)
+                            print("Server:", file.lastMod)
+
+                        } else {
+
+                            fileNeedsDownload = false
+
+                            print("✅ File unchanged")
+                            print("File:", file.id)
+                        }
+
+                    } else {
+
+                        // Could not read the existing file's timestamp.
+                        // Safest option is to download it again.
+
+                        fileNeedsDownload = true
+
+                        print("⚠️ Could not read local file date")
+                        print("⬇️ Downloading file again:", file.id)
+                    }
+                }
+
+                if !fileNeedsDownload {
+                    continue
+                }
+
+                print("")
+                print("⬇️ Downloading file:", file.id)
+                print("Path:", filePath)
+
+                guard let downloadedFile =
+                        await getDownloadFile(
+                            packageId: package.id,
+                            fileId: file.id
+                        )
+                else {
+
+                    print("❌ Could not get download information")
+                    print("File:", file.id)
+
+                    removeStagingDirectory(
+                        operationStagingDirectory
+                    )
+
+                    return false
+                }
+
+                guard await downloadFileToStaging(
+                    downloadedFile: downloadedFile,
+                    expectedPath: file.path,
+                    packageStagingDirectory: packageStagingDirectory
+                )
+                else {
+
+                    print("❌ File failed to download")
+                    print("File:", file.id)
+
+                    removeStagingDirectory(
+                        operationStagingDirectory
+                    )
+
+                    return false
+                }
+
+                print(
+                    "✅ File successfully updated in staging:",
+                    file.id
+                )
+            }
+
+            // MARK: Step 4 - Promote COMPLETE package
+
+            /*
+             At this point:
+
+             Main package:
+                 STILL UNTOUCHED
+
+             Staging package:
+                 COMPLETE OLD PACKAGE
+                 + NEW FILES
+                 + UPDATED FILES
+
+             Now replace the entire Main package.
+             */
+
+            guard promoteCompletePackageToMainStorage(
+                packagePath: packagePath,
+                packageStagingDirectory: packageStagingDirectory,
+                operationStagingDirectory: operationStagingDirectory
+            )
+            else {
+
+                print("❌ Failed to promote complete package")
+
+                removeStagingDirectory(
+                    operationStagingDirectory
+                )
+
+                return false
+            }
+
+            // MARK: Step 5 - Update local modification dates
+
+            let mainPackageDirectory =
+                packagesDirectory.appendingPathComponent(
+                    sanitizedRelativePath(packagePath),
+                    isDirectory: true
+                )
+
+            for file in files {
+
+                guard let filePath = file.path else {
+                    continue
+                }
+
+                let localFileURL =
+                    mainPackageDirectory.appendingPathComponent(
+                        sanitizedRelativePath(filePath)
+                    )
+
+                /*
+                 Store the SERVER FILE timestamp on the local file.
+
+                 This makes each local file represent its
+                 corresponding server file version.
+                 */
+
+                setModificationDate(
+                    at: localFileURL,
+                    unixTimestampMilliseconds: file.lastMod
+                )
+            }
+
+            // MARK: Step 6 - Update SyncTable
+
+            SyncTable.shared.forceUpdateLastMod(
+                packageId: package.id,
+                serverLastMod: package.lastMod,
+                name: package.path ?? package.id
+            )
+
+            // MARK: Step 7 - Verify SyncTable
+
+            guard let updatedSyncRecord =
+                    SyncTable.shared.getRecord(
+                        packageId: package.id
+                    )
+            else {
+
+                print(
+                    "❌ Download succeeded but SyncTable record was not found"
+                )
+
+                removeStagingDirectory(
+                    operationStagingDirectory
+                )
+
+                return false
+            }
+
+            guard updatedSyncRecord.lastMod == package.lastMod
+            else {
+
+                print(
+                    "❌ SyncTable lastMod does not match server"
+                )
+
+                print("Expected:", package.lastMod)
+                print("Actual:", updatedSyncRecord.lastMod)
+
+                removeStagingDirectory(
+                    operationStagingDirectory
+                )
+
+                return false
+            }
+
+            print("")
+            print("💾 SyncTable lastMod updated from SERVER")
+            print("Package:", package.id)
+            print("Server lastMod:", package.lastMod)
+            print(
+                "SyncTable lastMod:",
+                updatedSyncRecord.lastMod
+            )
+            print(
+                "conflict:",
+                updatedSyncRecord.conflict
+            )
+
+            // MARK: Step 8 - Remove staging
+
+            removeStagingDirectory(
+                operationStagingDirectory
+            )
+
+            print("")
+            print("🎉 Package synchronization completed")
+            print("")
+
+            return true
+
+        } catch {
+
+            print("❌ Package download error:")
+            print(error.localizedDescription)
+
+            removeStagingDirectory(
+                operationStagingDirectory
+            )
+
+            return false
+        }
+    }
+
+    // MARK: - Check Package Directory
+
+    private func packageDirectoryExists(
+        at url: URL
+    ) -> Bool {
+
+        var isDirectory: ObjCBool = false
+
+        let exists =
+            FileManager.default.fileExists(
+                atPath: url.path,
+                isDirectory: &isDirectory
+            )
+
+        return exists && isDirectory.boolValue
+    }
+
+    // MARK: - Get Local Package Last Modified
+
+    private func getLocalPackageLastModified(
+        at packageDirectory: URL
+    ) -> Int64? {
+
+        guard let enumerator =
+                FileManager.default.enumerator(
+                    at: packageDirectory,
+                    includingPropertiesForKeys: [
+                        .contentModificationDateKey,
+                        .isRegularFileKey
+                    ]
+                )
+        else {
+            return nil
+        }
+
+        var latestModificationDate: Date?
+
+        for case let fileURL as URL in enumerator {
+
+            guard let resourceValues =
+                    try? fileURL.resourceValues(
+                        forKeys: [
+                            .contentModificationDateKey,
+                            .isRegularFileKey
+                        ]
+                    )
+            else {
+                continue
+            }
+
+            // Ignore directories.
+
+            guard resourceValues.isRegularFile == true,
+                  let modificationDate =
+                    resourceValues.contentModificationDate
+            else {
+                continue
+            }
+
+            if latestModificationDate == nil ||
+                modificationDate > latestModificationDate! {
+
+                latestModificationDate =
+                    modificationDate
+            }
+        }
+
+        guard let latestModificationDate else {
+            return nil
+        }
+
+        return Int64(
+            latestModificationDate.timeIntervalSince1970 * 1000
+        )
+    }
+
+    // MARK: - Get File Modification Time
+
+    private func getFileModificationTime(
+        at url: URL
+    ) -> Int64? {
+
+        guard
+            let resourceValues =
+                try? url.resourceValues(
+                    forKeys: [
+                        .contentModificationDateKey,
+                        .isRegularFileKey
+                    ]
+                ),
+            resourceValues.isRegularFile == true,
+            let modificationDate =
+                resourceValues.contentModificationDate
+        else {
+            return nil
+        }
+
+        return Int64(
+            modificationDate.timeIntervalSince1970 * 1000
+        )
+    }
+
+    // MARK: - Set Modification Date
+
+    private func setModificationDate(
+        at url: URL,
+        unixTimestampMilliseconds: Int64
+    ) {
+
+        let seconds =
+            TimeInterval(unixTimestampMilliseconds) / 1000
+
+        let date =
+            Date(
+                timeIntervalSince1970: seconds
+            )
+
+        do {
+
+            try FileManager.default.setAttributes(
+                [
+                    .modificationDate: date
+                ],
+                ofItemAtPath: url.path
+            )
+
+            print("🕒 Local modification date updated")
+            print("File:", url.path)
+
+        } catch {
+
+            print("⚠️ Could not set modification date")
+            print(error.localizedDescription)
+        }
+    }
+
+    // MARK: - Get Presigned URL
+
+    private func getDownloadFile(
         packageId: String,
         fileId: String
-    ) async -> String? {
+    ) async -> DownloadedFile? {
 
-        // Get authentication token
+        guard let token =
+                AuthManager.shared.getToken()
+        else {
 
-        guard let token = AuthManager.shared.getToken() else {
-
-            print("❌ ID token not found")
+            print("❌ Cognito ID token not found")
 
             return nil
         }
 
-        // Create request body
-
-        let requestBody = DownloadRequest(
-            packages: [
-                DownloadPackage(
-                    packageId: packageId,
-                    files: [fileId]
-                )
-            ]
-        )
+        let requestBody =
+            DownloadRequest(
+                packages: [
+                    DownloadPackage(
+                        packageId: packageId,
+                        files: [fileId]
+                    )
+                ]
+            )
 
         do {
 
-            // Convert Swift object → JSON
-
             let jsonData =
-                try JSONEncoder().encode(requestBody)
-
-            // Create HTTP request
+                try JSONEncoder().encode(
+                    requestBody
+                )
 
             var request =
-                URLRequest(url: downloadURL)
+                URLRequest(
+                    url: downloadURL
+                )
 
             request.httpMethod = "POST"
 
@@ -98,36 +901,33 @@ class DownloadApiClass {
                 forHTTPHeaderField: "Content-Type"
             )
 
-            request.httpBody = jsonData
-
-            // Send request to backend
+            request.httpBody =
+                jsonData
 
             let (data, response) =
                 try await URLSession.shared.data(
                     for: request
                 )
 
-            // Check HTTP response
-
             guard let httpResponse =
-                    response as? HTTPURLResponse else {
+                    response as? HTTPURLResponse
+            else {
 
                 print("❌ Invalid API response")
 
                 return nil
             }
 
-            guard httpResponse.statusCode == 200 else {
+            guard httpResponse.statusCode == 200
+            else {
 
                 print(
-                    "❌ API request failed with status:",
+                    "❌ Download API failed:",
                     httpResponse.statusCode
                 )
 
                 return nil
             }
-
-            // Convert JSON → Swift object
 
             let downloadResponse =
                 try JSONDecoder().decode(
@@ -135,218 +935,373 @@ class DownloadApiClass {
                     from: data
                 )
 
-            // Get the first package
-
             guard let downloadedPackage =
-                    downloadResponse.packages.first else {
+                    downloadResponse.packages.first
+            else {
 
-                print("❌ No package returned")
+                print("❌ Lambda returned no package")
 
                 return nil
             }
-
-            // Get the first file
 
             guard let downloadedFile =
-                    downloadedPackage.files.first else {
+                    downloadedPackage.files.first
+            else {
 
-                print("❌ No file returned")
+                print("❌ Lambda returned no file")
 
                 return nil
             }
 
-            // Print the URL so we can verify it
-
+            print("🔗 Presigned URL received")
+            print("File:", downloadedFile.id)
             print(
-                "🔗 Download URL returned by backend:"
+                "S3 path:",
+                downloadedFile.path ?? "nil"
+            )
+            print(
+                "Size:",
+                downloadedFile.size
             )
 
-            print(
-                downloadedFile.downloadUrl
-            )
-
-            // Return the secure download URL
-
-            return downloadedFile.downloadUrl
+            return downloadedFile
 
         } catch {
 
-            print(
-                "❌ API error:",
-                error.localizedDescription
-            )
+            print("❌ Download API error:")
+            print(error.localizedDescription)
 
             return nil
         }
     }
 
-    // MARK: - Download File
+    // MARK: - Download File Into Staging
 
-    func downloadFile(
-        from downloadUrl: String,
-        fileName: String
-    ) async -> URL? {
+    private func downloadFileToStaging(
+        downloadedFile: DownloadedFile,
+        expectedPath: String?,
+        packageStagingDirectory: URL
+    ) async -> Bool {
 
-        // Convert String → URL
+        guard let url =
+                URL(
+                    string: downloadedFile.downloadUrl
+                )
+        else {
 
-        guard let url = URL(
-            string: downloadUrl
-        ) else {
+            print("❌ Invalid presigned URL")
 
-            print("❌ Invalid download URL:")
-            print(downloadUrl)
-
-            return nil
+            return false
         }
 
-        // Make sure this is a web URL
-
         guard let scheme = url.scheme,
-              scheme == "https" || scheme == "http" else {
+              scheme == "https" || scheme == "http"
+        else {
 
-            print(
-                "❌ Download URL is not an HTTP/HTTPS URL:"
-            )
+            print("❌ Download URL is not HTTP/HTTPS")
 
-            print(downloadUrl)
-
-            print(
-                "⚠️ The backend must return a presigned HTTPS URL."
-            )
-
-            return nil
+            return false
         }
 
         do {
 
-            // MARK: - Download File
-
-            let (data, response) =
-                try await URLSession.shared.data(
+            let (temporaryURL, response) =
+                try await URLSession.shared.download(
                     from: url
                 )
 
-            // Check HTTP response
-
             guard let httpResponse =
-                    response as? HTTPURLResponse else {
+                    response as? HTTPURLResponse
+            else {
 
-                print(
-                    "❌ Invalid file download response"
-                )
+                print("❌ Invalid S3 response")
 
-                return nil
+                return false
             }
 
-            guard httpResponse.statusCode == 200 else {
+            guard httpResponse.statusCode == 200
+            else {
 
                 print(
-                    "❌ File download failed."
-                )
-
-                print(
-                    "HTTP Status:",
+                    "❌ S3 download failed:",
                     httpResponse.statusCode
                 )
 
-                return nil
+                return false
             }
 
-            print(
-                "✅ File received from server"
-            )
+            let relativePath =
+                expectedPath
+                ?? downloadedFile.path
+                ?? downloadedFile.id
 
-            print(
-                "📦 Downloaded bytes:",
-                data.count
-            )
-
-            // MARK: - Documents Directory
-
-            let documentsDirectory =
-                FileManager.default.urls(
-                    for: .documentDirectory,
-                    in: .userDomainMask
-                )[0]
-
-            // MARK: - Downloads Directory
-
-            let downloadsDirectory =
-                documentsDirectory.appendingPathComponent(
-                    "Downloads",
-                    isDirectory: true
+            let safeRelativePath =
+                sanitizedRelativePath(
+                    relativePath
                 )
 
-            // Create Downloads folder
-
-            try FileManager.default.createDirectory(
-                at: downloadsDirectory,
-                withIntermediateDirectories: true
-            )
-
-            // MARK: - File Location
-
-            let fileURL =
-                downloadsDirectory.appendingPathComponent(
-                    fileName
+            let stagedFileURL =
+                packageStagingDirectory.appendingPathComponent(
+                    safeRelativePath
                 )
-
-            // Create parent directory if fileName
-            // contains folders.
 
             let parentDirectory =
-                fileURL.deletingLastPathComponent()
+                stagedFileURL.deletingLastPathComponent()
 
             try FileManager.default.createDirectory(
                 at: parentDirectory,
                 withIntermediateDirectories: true
             )
 
-            // Remove existing file
+            // Replace ONLY inside staging.
 
             if FileManager.default.fileExists(
-                atPath: fileURL.path
+                atPath: stagedFileURL.path
             ) {
 
+                print("♻️ Replacing file INSIDE staging")
+                print(stagedFileURL.path)
+
                 try FileManager.default.removeItem(
-                    at: fileURL
+                    at: stagedFileURL
                 )
             }
 
-            // Save downloaded data
-
-            try data.write(
-                to: fileURL
+            try FileManager.default.moveItem(
+                at: temporaryURL,
+                to: stagedFileURL
             )
 
-            // MARK: - Success
+            print("📦 File placed in staging:")
+            print(stagedFileURL.path)
 
-            print(
-                "✅ File downloaded successfully"
+            return true
+
+        } catch {
+
+            print("❌ S3 download/staging error:")
+            print(error.localizedDescription)
+
+            return false
+        }
+    }
+
+    // MARK: - Promote Complete Package
+
+    private func promoteCompletePackageToMainStorage(
+        packagePath: String,
+        packageStagingDirectory: URL,
+        operationStagingDirectory: URL
+    ) -> Bool {
+
+        let safePackagePath =
+            sanitizedRelativePath(
+                packagePath
             )
 
-            print(
-                "📍 File stored at:"
+        let mainPackageDirectory =
+            packagesDirectory.appendingPathComponent(
+                safePackagePath,
+                isDirectory: true
             )
 
-            print(
-                fileURL.path
+        let backupPackageDirectory =
+            operationStagingDirectory.appendingPathComponent(
+                "OldPackageBackup",
+                isDirectory: true
             )
 
-            return fileURL
+        do {
+
+            // MARK: Make sure Packages directory exists
+
+            try FileManager.default.createDirectory(
+                at: packagesDirectory,
+                withIntermediateDirectories: true
+            )
+
+            // MARK: Make sure package parent exists
+
+            try FileManager.default.createDirectory(
+                at:
+                    mainPackageDirectory
+                        .deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+
+            // MARK: Verify staging package
+
+            guard packageDirectoryExists(
+                at: packageStagingDirectory
+            )
+            else {
+
+                print("❌ Staging package does not exist")
+                print(packageStagingDirectory.path)
+
+                return false
+            }
+
+            // MARK: Move existing Main package to backup
+
+            if packageDirectoryExists(
+                at: mainPackageDirectory
+            ) {
+
+                print("")
+                print(
+                    "📦 Moving old Main package to temporary backup"
+                )
+
+                print(mainPackageDirectory.path)
+
+                try FileManager.default.moveItem(
+                    at: mainPackageDirectory,
+                    to: backupPackageDirectory
+                )
+
+                print("✅ Old Main package backed up")
+            }
+
+            // MARK: Move complete staging package to Main
+
+            print("")
+            print("🚚 Moving COMPLETE staging package to Main")
+
+            print("FROM:")
+            print(packageStagingDirectory.path)
+
+            print("TO:")
+            print(mainPackageDirectory.path)
+
+            do {
+
+                try FileManager.default.moveItem(
+                    at: packageStagingDirectory,
+                    to: mainPackageDirectory
+                )
+
+                print("")
+                print("✅ COMPLETE PACKAGE promoted to Main")
+
+            } catch {
+
+                print("")
+                print(
+                    "❌ Could not move staging package to Main"
+                )
+
+                print(error.localizedDescription)
+
+                // Restore old package.
+
+                if packageDirectoryExists(
+                    at: backupPackageDirectory
+                ) {
+
+                    print(
+                        "♻️ Restoring old Main package"
+                    )
+
+                    try? FileManager.default.moveItem(
+                        at: backupPackageDirectory,
+                        to: mainPackageDirectory
+                    )
+
+                    print("✅ Old Main package restored")
+                }
+
+                return false
+            }
+
+            // MARK: Remove old backup
+
+            if FileManager.default.fileExists(
+                atPath: backupPackageDirectory.path
+            ) {
+
+                try FileManager.default.removeItem(
+                    at: backupPackageDirectory
+                )
+
+                print("🧹 Old package backup removed")
+            }
+
+            return true
+
+        } catch {
+
+            print("❌ Complete package promotion error:")
+            print(error.localizedDescription)
+
+            // Try to restore old package.
+
+            if !FileManager.default.fileExists(
+                atPath: mainPackageDirectory.path
+            ),
+               packageDirectoryExists(
+                    at: backupPackageDirectory
+               ) {
+
+                print(
+                    "♻️ Attempting to restore old Main package"
+                )
+
+                try? FileManager.default.moveItem(
+                    at: backupPackageDirectory,
+                    to: mainPackageDirectory
+                )
+            }
+
+            return false
+        }
+    }
+
+    // MARK: - Remove Staging
+
+    private func removeStagingDirectory(
+        _ operationStagingDirectory: URL
+    ) {
+
+        do {
+
+            if FileManager.default.fileExists(
+                atPath: operationStagingDirectory.path
+            ) {
+
+                try FileManager.default.removeItem(
+                    at: operationStagingDirectory
+                )
+
+                print("🧹 Staging area removed")
+            }
 
         } catch {
 
             print(
-                "❌ Download error:"
+                "⚠️ Could not completely remove staging"
             )
 
-            print(
-                error.localizedDescription
-            )
-
-            return nil
+            print(error.localizedDescription)
         }
     }
-}
 
+    // MARK: - Path Sanitization
+
+    private func sanitizedRelativePath(
+        _ path: String
+    ) -> String {
+
+        let components =
+            path
+                .split(separator: "/")
+                .filter {
+                    $0 != "." &&
+                    $0 != ".."
+                }
+
+        return components.joined(
+            separator: "/"
+        )
+    }
+}

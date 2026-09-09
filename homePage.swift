@@ -11,6 +11,9 @@ struct HomeView: View {
     @State private var showPackages = false
     @State private var isLoading = false
 
+    @State private var packagesNeedingUpdate: Set<String> = []
+    @State private var packagesWithConflict: Set<String> = []
+
     // MARK: - Selected Package
 
     @State private var selectedPackageId = ""
@@ -136,7 +139,8 @@ struct HomeView: View {
                             HStack {
 
                                 Image(
-                                    systemName: "shippingbox"
+                                    systemName:
+                                        "shippingbox"
                                 )
 
                                 Text("Your Notebooks")
@@ -318,6 +322,12 @@ struct HomeView: View {
                                                 .foregroundStyle(
                                                     .white.opacity(0.7)
                                                 )
+
+                                                // MARK: - Sync Status
+
+                                                syncStatusView(
+                                                    package: package
+                                                )
                                             }
                                         }
                                         .padding(18)
@@ -326,12 +336,15 @@ struct HomeView: View {
                                             alignment: .leading
                                         )
                                         .contentShape(Rectangle())
+
+                                        // MARK: - Open Package
+
                                         .onTapGesture {
 
                                             openPackage(package)
                                         }
 
-                                        // MARK: - Download Button
+                                        // MARK: - Download / Sync Button
 
                                         Button {
 
@@ -343,7 +356,9 @@ struct HomeView: View {
 
                                             Image(
                                                 systemName:
-                                                    "arrow.down.circle"
+                                                    syncIcon(
+                                                        for: package
+                                                    )
                                             )
                                             .font(
                                                 .system(size: 22)
@@ -384,7 +399,7 @@ struct HomeView: View {
                 }
             }
 
-            // MARK: - Refresh Token Button
+            // MARK: - Refresh Package Status
 
             .toolbar {
 
@@ -394,9 +409,7 @@ struct HomeView: View {
 
                     Button {
 
-                        Task {
-                            await refreshTokens()
-                        }
+                        loadPackages()
 
                     } label: {
 
@@ -434,13 +447,15 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - Load Packages
+    // MARK: - Load Packages + Check Sync Status
 
     private func loadPackages() {
 
         isLoading = true
 
         Task {
+
+            // Get latest package metadata from server.
 
             let receivedPackages =
                 await ApiCallClass
@@ -451,11 +466,171 @@ struct HomeView: View {
 
                 if let receivedPackages {
 
-                    packages = receivedPackages
+                    var packagesNeedingUpdate: Set<String> = []
+                    var packagesWithConflict: Set<String> = []
+
+                    // Each package is checked independently.
+
+                    for package in receivedPackages {
+
+                        let syncRecord =
+                            SyncTable.shared.getRecord(
+                                packageId: package.id
+                            )
+
+                        print("")
+                        print("📦 Package:", package.id)
+                        print(
+                            "📁 Package path:",
+                            package.path ?? "nil"
+                        )
+                        print(
+                            "🌐 Server lastMod:",
+                            package.lastMod
+                        )
+
+                        if let syncRecord {
+
+                            print(
+                                "💾 SyncTable lastMod:",
+                                syncRecord.lastMod
+                            )
+
+                            print(
+                                "⚠️ Conflict:",
+                                syncRecord.conflict
+                            )
+
+                        } else {
+
+                            print(
+                                "💾 SyncTable record: nil"
+                            )
+                        }
+
+                        // ------------------------------------------------
+                        // NO SYNC RECORD
+                        //
+                        // This package has never synchronized.
+                        // ------------------------------------------------
+
+                        guard let syncRecord else {
+
+                            print(
+                                "🆕 No SyncTable record. Download required."
+                            )
+
+                            packagesNeedingUpdate.insert(
+                                package.id
+                            )
+
+                            continue
+                        }
+
+                        // ------------------------------------------------
+                        // CONFLICT
+                        //
+                        // Conflict belongs to THIS package only.
+                        // ------------------------------------------------
+
+                        if syncRecord.conflict {
+
+                            print(
+                                "⚠️ Package is in CONFLICT:",
+                                package.id
+                            )
+
+                            packagesWithConflict.insert(
+                                package.id
+                            )
+
+                            continue
+                        }
+
+                        // ------------------------------------------------
+                        // SERVER > SYNCTABLE
+                        //
+                        // This package has a newer server version.
+                        // ------------------------------------------------
+
+                        if syncRecord.lastMod < package.lastMod {
+
+                            print(
+                                "⬇️ Server is newer. Download required."
+                            )
+
+                            packagesNeedingUpdate.insert(
+                                package.id
+                            )
+
+                            continue
+                        }
+
+                        // ------------------------------------------------
+                        // SERVER == SYNCTABLE
+                        //
+                        // This package is synchronized with server.
+                        //
+                        // Local timestamp is intentionally NOT checked
+                        // here.
+                        //
+                        // DownloadApiClass handles the local/sync/server
+                        // comparison when synchronization is requested.
+                        // ------------------------------------------------
+
+                        if syncRecord.lastMod == package.lastMod {
+
+                            print(
+                                "✅ Server == SyncTable"
+                            )
+
+                            continue
+                        }
+
+                        // ------------------------------------------------
+                        // SERVER < SYNCTABLE
+                        //
+                        // Ignore this package state.
+                        // ------------------------------------------------
+
+                        if syncRecord.lastMod > package.lastMod {
+
+                            print(
+                                "ℹ️ SyncTable > Server"
+                            )
+
+                            print(
+                                "Ignoring this case."
+                            )
+
+                            continue
+                        }
+                    }
+
+                    packages =
+                        receivedPackages
+
+                    self.packagesNeedingUpdate =
+                        packagesNeedingUpdate
+
+                    self.packagesWithConflict =
+                        packagesWithConflict
+
                     showPackages = true
 
+                    print("")
                     print(
                         "✅ Received \(receivedPackages.count) packages"
+                    )
+
+                    print(
+                        "⬇️ Packages needing download:",
+                        packagesNeedingUpdate
+                    )
+
+                    print(
+                        "⚠️ Packages with conflict:",
+                        packagesWithConflict
                     )
 
                 } else {
@@ -470,28 +645,69 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - Refresh Cognito Token
+    // MARK: - Sync Status View
 
-    private func refreshTokens() async {
+    @ViewBuilder
+    private func syncStatusView(
+        package: Package
+    ) -> some View {
 
-        let success =
-            await AuthManager.shared.refreshToken()
+        if packagesWithConflict.contains(package.id) {
 
-        await MainActor.run {
+            Text("Conflict")
+                .font(
+                    .system(
+                        size: 13,
+                        weight: .semibold
+                    )
+                )
+                .foregroundStyle(.orange)
 
-            if success {
+        } else if packagesNeedingUpdate.contains(package.id) {
 
-                print(
-                    "🔄 Token refreshed successfully"
+            Text("Update available")
+                .font(
+                    .system(
+                        size: 13,
+                        weight: .semibold
+                    )
+                )
+                .foregroundStyle(
+                    .white.opacity(0.8)
                 )
 
-            } else {
+        } else {
 
-                print(
-                    "❌ Could not refresh token"
+            Text("Synchronized")
+                .font(
+                    .system(
+                        size: 13,
+                        weight: .semibold
+                    )
                 )
-            }
+                .foregroundStyle(
+                    .white.opacity(0.8)
+                )
         }
+    }
+
+    // MARK: - Sync Icon
+
+    private func syncIcon(
+        for package: Package
+    ) -> String {
+
+        if packagesWithConflict.contains(package.id) {
+
+            return "exclamationmark.triangle"
+        }
+
+        if packagesNeedingUpdate.contains(package.id) {
+
+            return "arrow.down.circle"
+        }
+
+        return "checkmark.circle"
     }
 
     // MARK: - Open Package
@@ -558,102 +774,84 @@ struct HomeView: View {
 
         Task {
 
-            // Get the files inside the package.
-
-            let files =
-                await PackageManifestApiClass
-                    .packageManifestObject
-                    .getPackageManifest(
-                        packageId: package.id
-                    )
-
-            guard let files else {
-
-                print(
-                    "❌ Failed to get package manifest for download"
-                )
-
-                return
-            }
-
             print(
-                "📦 Package contains \(files.count) files"
+                "📦 User selected package for synchronization"
             )
 
-            // Download each file.
-
-            for file in files {
-
-                // Step 1:
-                // Ask backend for the secure download URL.
-
-                guard let downloadURL =
-                        await DownloadApiClass
-                            .shared
-                            .getDownloadURL(
-                                packageId: package.id,
-                                fileId: file.id
-                            )
-                else {
-
-                    print(
-                        "❌ Could not get download URL for \(file.id)"
-                    )
-
-                    continue
-                }
-
-                print(
-                    "🔗 Got download URL for \(file.id)"
-                )
-
-                // Step 2:
-                // Download the file and save it locally.
-
-                guard let fileURL =
-                        await DownloadApiClass
-                            .shared
-                            .downloadFile(
-                                from: downloadURL,
-                                fileName: file.path ?? file.id
-                            )
-                else {
-
-                    print(
-                        "❌ Failed to download \(file.id)"
-                    )
-
-                    continue
-                }
-
-                // Step 3:
-                // fileURL tells us where the file was saved.
-
-                print(
-                    "✅ Downloaded \(file.id)"
-                )
-
-                print(
-                    "📍 Saved at: \(fileURL.path)"
-                )
-            }
+            print(
+                "Package ID:",
+                package.id
+            )
 
             print(
-                "✅ Package download process completed"
+                "Package path:",
+                package.path ?? "nil"
             )
+
+            let success =
+                await DownloadApiClass
+                    .shared
+                    .downloadPackage(
+                        package: package
+                    )
+
+            await MainActor.run {
+
+                if success {
+
+                    // DownloadApiClass has already updated
+                    // the SyncTable record.
+
+                    if let syncRecord =
+                        SyncTable.shared.getRecord(
+                            packageId: package.id
+                        ) {
+
+                        if syncRecord.conflict {
+
+                            packagesWithConflict.insert(
+                                package.id
+                            )
+
+                        } else if syncRecord.lastMod ==
+                                    package.lastMod {
+
+                            packagesNeedingUpdate.remove(
+                                package.id
+                            )
+
+                            packagesWithConflict.remove(
+                                package.id
+                            )
+                        }
+                    }
+
+                    print(
+                        "🎉 Package synchronization completed"
+                    )
+
+                } else {
+
+                    print(
+                        "❌ Package synchronization failed"
+                    )
+                }
+            }
         }
     }
 
     // MARK: - Format Date
 
+    // Server lastMod is Unix milliseconds.
+
     private func formattedDate(
-        from milliseconds: Int64
+        from unixTimestamp: Int64
     ) -> String {
 
         let date =
             Date(
                 timeIntervalSince1970:
-                    TimeInterval(milliseconds) / 1000
+                    TimeInterval(unixTimestamp) / 1000
             )
 
         let formatter =
